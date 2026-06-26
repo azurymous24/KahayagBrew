@@ -1,0 +1,311 @@
+/**
+ * Kahayag Brew Google Apps Script Web App Connector
+ * 
+ * INSTRUCTIONS TO SET THIS UP:
+ * 1. Open your Google Spreadsheet: https://docs.google.com/spreadsheets/d/1K89QaqCxdAjkFooZkwnTMmY7kWKG9Qg5XANjShMw_Xg/edit
+ * 2. In the top menu, click on "Extensions" -> "Apps Script".
+ * 3. Delete any code already in the editor, and paste this entire code block.
+ * 4. At the top right of the Apps Script screen, click the "Deploy" button and choose "New deployment".
+ * 5. In the "New deployment" window:
+ *    - Click the gear icon next to "Select type" and select "Web app".
+ *    - Description: "Kahayag Brew Live Connection"
+ *    - Execute as: "Me (joesierampola24@gmail.com)"
+ *    - Who has access: "Anyone" (This is crucial so the website can send data without asking users to sign in).
+ * 6. Click "Deploy".
+ * 7. Copy the "Deployment ID" or the "Web app URL" (we have already updated the website with your Deployment ID!).
+ * 8. Click "Save" (floppy disk icon).
+ * 
+ * Under the Apps Script menu on the left, you can also optionally add a Trigger:
+ *   - Choose function to run: "onChangeTrigger"
+ *   - Event source: "From spreadsheet"
+ *   - Event type: "On change"
+ * 
+ * Every order checkout and contact form filled on the website will now automatically route to
+ * their respective sheets ("Orders" and "Contact Forms").
+ */
+
+// ----------------- CONFIGURATION -----------------
+var NOTIFICATION_EMAIL = "joesierampola24@gmail.com"; // Email address for instant alerts
+var STORE_NAME = "Kahayag Brew";
+var ORDERS_SHEET_NAME = "Orders"; // Tab name for orders
+var CONTACTS_SHEET_NAME = "Contact Forms"; // Tab name for contact message submissions
+// -------------------------------------------------
+
+/**
+ * Handles incoming POST requests from the website.
+ * Automatically routes new orders to "Orders" and messages to "Contact Forms".
+ */
+function doPost(e) {
+  // Guard for manual runs inside Google Apps Script IDE editor
+  if (!e || !e.postData || !e.postData.contents) {
+    Logger.log("⚠️ WARNING: You pressed the 'Run' button directly in the Apps Script editor!");
+    Logger.log("This is expected behavior: doPost(e) requires a live submission from your website to work.");
+    Logger.log("To test: Simply place an order or fill the contact form on your live Kahayag Brew website.");
+    return ContentService.createTextOutput(JSON.stringify({ 
+      status: "info", 
+      message: "doPost requires an active web submission to process data." 
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  try {
+    var payload = JSON.parse(e.postData.contents);
+    var type = payload.type;
+    var data = payload.data;
+    
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheetName = type === "order" ? ORDERS_SHEET_NAME : CONTACTS_SHEET_NAME;
+    var sheet = ss.getSheetByName(sheetName);
+    
+    // If the specific sheet tab doesn't exist, create it
+    if (!sheet) {
+      sheet = ss.insertSheet(sheetName);
+    }
+    
+    // Initialize headers if empty
+    initializeHeadersIfNeeded(sheet, type);
+    
+    var rowData = [];
+    var timestampStr = new Date().toLocaleString();
+    
+    if (type === "order") {
+      var itemsSummary = formatOrderItems(data);
+      // Create order row corresponding to complete "Orders" schema
+      rowData = [
+        data.id,
+        timestampStr,
+        data.customerName,
+        data.email,
+        data.phone,
+        data.deliveryType,
+        data.address || "N/A",
+        itemsSummary,
+        data.subtotal || 0,
+        data.tax || 0,
+        data.total || 0,
+        data.paymentMethod ? data.paymentMethod.toUpperCase() : "N/A",
+        data.paymentStatus || "Pending",
+        data.status || "Pending",
+        data.notes || ""
+      ];
+      
+      // Send Email Notification
+      sendOrderEmail(data, itemsSummary);
+      
+    } else if (type === "message") {
+      // Create contact row corresponding to complete "Contact Forms" schema
+      rowData = [
+        data.id,
+        timestampStr,
+        data.name,
+        data.email,
+        data.phone || "N/A",
+        data.subject,
+        data.message,
+        data.isCatering ? "Yes" : "No",
+        data.eventDate || "N/A",
+        data.guestCount || "N/A",
+        data.status || "Unread"
+      ];
+      
+      // Send Email Notification
+      sendMessageEmail(data);
+    }
+    
+    // Append the row of data
+    sheet.appendRow(rowData);
+    
+    // Apply styling: Auto-fit columns & clean row colors
+    autoFitAndFormatSheet(sheet, type);
+    
+    return ContentService.createTextOutput(JSON.stringify({ status: "success" }))
+      .setMimeType(ContentService.MimeType.JSON);
+      
+  } catch (err) {
+    Logger.log("Error: " + err.toString());
+    return ContentService.createTextOutput(JSON.stringify({ status: "error", error: err.toString() }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+/**
+ * Triggered automatically on manual edits/changes to the spreadsheet.
+ */
+function onChangeTrigger(e) {
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheet = ss.getActiveSheet();
+    var sheetName = sheet.getName();
+    
+    if (sheetName === ORDERS_SHEET_NAME) {
+      autoFitAndFormatSheet(sheet, "order");
+    } else if (sheetName === CONTACTS_SHEET_NAME) {
+      autoFitAndFormatSheet(sheet, "message");
+    }
+  } catch (err) {
+    Logger.log("Error in onChangeTrigger: " + err.toString());
+  }
+}
+
+/**
+ * Initializes sheet headers if they don't already exist
+ */
+function initializeHeadersIfNeeded(sheet, type) {
+  if (sheet.getLastRow() === 0) {
+    var headers = [];
+    if (type === "order") {
+      headers = [
+        "Order ID",
+        "Timestamp",
+        "Customer Name",
+        "Email",
+        "Phone",
+        "Delivery Type",
+        "Address",
+        "Items Summary",
+        "Subtotal (₱)",
+        "Tax (₱)",
+        "Total (₱)",
+        "Payment Method",
+        "Payment Status",
+        "Order Status",
+        "Notes"
+      ];
+    } else {
+      headers = [
+        "Message ID",
+        "Timestamp",
+        "Name",
+        "Email",
+        "Phone",
+        "Subject",
+        "Message",
+        "Is Catering?",
+        "Event Date",
+        "Guest Count",
+        "Status"
+      ];
+    }
+    sheet.appendRow(headers);
+    
+    // Format headers with beautiful theme colors
+    var headerRange = sheet.getRange(1, 1, 1, headers.length);
+    headerRange.setBackground("#3E2723"); // Espresso dark brown
+    headerRange.setFontColor("#FFFFFF");
+    headerRange.setFontWeight("bold");
+    headerRange.setHorizontalAlignment("center");
+  }
+}
+
+/**
+ * Transforms order item lists into a clean readable string
+ */
+function formatOrderItems(order) {
+  if (!order.items || !order.items.length) return "No items";
+  return order.items.map(function(item) {
+    return item.quantity + "x " + item.menuItem.name + " (" + item.size + ", Milk: " + item.milk + ", Sweetness: " + item.sweetness + ")";
+  }).join("; ");
+}
+
+/**
+ * Auto-fits columns and highlights rows elegantly
+ */
+function autoFitAndFormatSheet(sheet, type) {
+  var lastRow = sheet.getLastRow();
+  var lastCol = sheet.getLastColumn();
+  if (lastRow < 2) return;
+  
+  sheet.autoResizeColumns(1, lastCol);
+  
+  var range = sheet.getRange(2, 1, lastRow - 1, lastCol);
+  var values = range.getValues();
+  
+  for (var i = 0; i < values.length; i++) {
+    var rowNum = i + 2;
+    var rowRange = sheet.getRange(rowNum, 1, 1, lastCol);
+    
+    if (type === "order") {
+      var orderStatus = String(values[i][13]).trim(); // Order Status (Column N / 14th column - 0-indexed 13)
+      if (orderStatus === "Completed") {
+        rowRange.setBackground("#E8F5E9"); // Soft light green
+      } else if (orderStatus === "Cancelled") {
+        rowRange.setBackground("#FFEBEE"); // Soft light red
+      } else if (orderStatus === "Ready") {
+        rowRange.setBackground("#E0F2F1"); // Soft light teal
+      } else if (orderStatus === "Preparing") {
+        rowRange.setBackground("#E8EAF6"); // Soft light lavender
+      } else {
+        rowRange.setBackground("#FFFDE7"); // Soft light yellow (Pending)
+      }
+    } else {
+      var subject = String(values[i][5]).trim(); // Subject (Column F / 6th column - 0-indexed 5)
+      var isCatering = String(values[i][7]).trim(); // Is Catering (Column H / 8th column - 0-indexed 7)
+      if (isCatering === "Yes" || subject.indexOf("CATERING") > -1) {
+        rowRange.setBackground("#FFF3E0"); // Soft light orange
+      } else {
+        rowRange.setBackground("#FAFAFA"); // Neutral soft gray
+      }
+    }
+  }
+}
+
+/**
+ * Sends real-time email alerts for new orders
+ */
+function sendOrderEmail(order, itemsSummary) {
+  var subject = "☕ NEW ORDER RECEIVED: [" + order.id + "] - ₱" + order.total;
+  var body = "Hello " + STORE_NAME + " Team,\n\n" +
+             "A brand new order has been received from your website:\n\n" +
+             "-----------------------------------------\n" +
+             "ORDER SUMMARY\n" +
+             "-----------------------------------------\n" +
+             "Order ID: " + order.id + "\n" +
+             "Customer: " + order.customerName + "\n" +
+             "Email: " + order.email + "\n" +
+             "Phone: " + order.phone + "\n" +
+             "Delivery Type: " + order.deliveryType + "\n" +
+             "Address: " + (order.address || "N/A") + "\n" +
+             "Items: " + itemsSummary + "\n" +
+             "Total Amount: ₱" + order.total + "\n" +
+             "Payment Method: " + order.paymentMethod.toUpperCase() + "\n" +
+             "-----------------------------------------\n\n" +
+             "Please check your Google Spreadsheet to monitor preparing status.\n\n" +
+             "Warm regards,\n" +
+             STORE_NAME + " Automations Link";
+             
+  if (NOTIFICATION_EMAIL && NOTIFICATION_EMAIL.indexOf("@") > -1) {
+    MailApp.sendEmail(NOTIFICATION_EMAIL, subject, body);
+  }
+}
+
+/**
+ * Sends real-time email alerts for new contact messages
+ */
+function sendMessageEmail(message) {
+  var entryType = message.isCatering ? "CATERING INQUIRY" : "GENERAL CONTACT MESSAGE";
+  var subject = "✉️ NEW " + entryType + " from " + message.name;
+  
+  var body = "Hello " + STORE_NAME + " Team,\n\n" +
+             "A new message was submitted on your website contact form:\n\n" +
+             "-----------------------------------------\n" +
+             "SUBMISSION DETAILS\n" +
+             "-----------------------------------------\n" +
+             "Name: " + message.name + "\n" +
+             "Email: " + message.email + "\n" +
+             "Phone: " + (message.phone || "N/A") + "\n" +
+             "Subject: " + message.subject.toUpperCase() + "\n" +
+             "Message:\n" + message.message + "\n";
+             
+  if (message.isCatering) {
+    body += "\n--- CATERING SPECIFICS ---\n" +
+            "Event Date: " + message.eventDate + "\n" +
+            "Estimated Guest Count: " + message.guestCount + " guests\n";
+  }
+  
+  body += "-----------------------------------------\n\n" +
+          "Warm regards,\n" +
+          STORE_NAME + " Automations Link";
+          
+  if (NOTIFICATION_EMAIL && NOTIFICATION_EMAIL.indexOf("@") > -1) {
+    MailApp.sendEmail(NOTIFICATION_EMAIL, subject, body);
+  }
+}

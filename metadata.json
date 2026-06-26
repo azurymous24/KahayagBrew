@@ -1,0 +1,6 @@
+{
+  "name": "Kahayag Coffee Shop",
+  "description": "An elegant, premium website and management system for Kahayag Brew, featuring a digital menu, interactive ordering, mockup payment integration, real-time reviews, and a store admin dashboard for inventory and orders.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
